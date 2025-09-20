@@ -1,34 +1,14 @@
 from fastapi import APIRouter, Query
 import requests
 import os
+import json
+import re
 
 router = APIRouter()
 
-# Directly declare your OpenWeatherMap API key
 API_KEY = os.getenv("OPEN_WEATHER_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 BASE_URL = "https://api.openweathermap.org/data/2.5/weather"
-
-# Crop-specific thresholds for advisories
-CROP_THRESHOLDS = {
-    "wheat": {
-        "max_temp": 35,
-        "min_temp": 10,
-        "max_humidity": 80,
-        "min_humidity": 30
-    },
-    "rice": {
-        "max_temp": 38,
-        "min_temp": 20,
-        "max_humidity": 90,
-        "min_humidity": 50
-    },
-    "cotton": {
-        "max_temp": 40,
-        "min_temp": 18,
-        "max_humidity": 70,
-        "min_humidity": 30
-    }
-}
 
 def fetch_weather(city: str):
     params = {"q": city, "appid": API_KEY, "units": "metric"}
@@ -43,13 +23,34 @@ def fetch_weather(city: str):
         "wind_speed": data["wind"]["speed"]
     }
 
-def generate_advisory(crop: str, weather_data: dict):
-    if crop not in CROP_THRESHOLDS:
-        return "No advisory available for this crop"
-    
+def fetch_crop_thresholds(crop: str):
+    from google import genai
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    prompt = (
+        f"Provide optimal weather thresholds for growing {crop} in JSON format. "
+        "Include max_temp, min_temp, max_humidity, min_humidity. Example: "
+        '{"max_temp": 35, "min_temp": 10, "max_humidity": 80, "min_humidity": 30}'
+    )
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+    )
+    try:
+        match = re.search(r'\{.*\}', response.text, flags=re.DOTALL)
+        if match:
+            thresholds = json.loads(match.group())
+            return thresholds
+        else:
+            return None
+    except Exception:
+        return None
+
+def generate_advisory(weather_data: dict, thresholds: dict):
+    if not thresholds:
+        return ["No advisory available for this crop (thresholds missing)"]
+
     t = weather_data["temperature"]
     h = weather_data["humidity"]
-    thresholds = CROP_THRESHOLDS[crop]
 
     advisories = []
 
@@ -72,15 +73,17 @@ def generate_advisory(crop: str, weather_data: dict):
     return advisories
 
 @router.get("/weather/")
-async def get_weather(city: str = Query(...), crop: str = Query("wheat")):
+async def get_weather(city: str = Query(...), crop: str = Query(...)):
     weather_data = fetch_weather(city)
     if "error" in weather_data:
         return weather_data
-    
-    advisory = generate_advisory(crop.lower(), weather_data)
+
+    thresholds = fetch_crop_thresholds(crop.lower())
+    advisory = generate_advisory(weather_data, thresholds)
     return {
         "city": city,
         "crop": crop,
         "weather_data": weather_data,
+        "thresholds": thresholds,
         "advisory": advisory
     }
